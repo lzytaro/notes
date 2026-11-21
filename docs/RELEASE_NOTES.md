@@ -1,4 +1,4 @@
-# 纸笺 v0.2.3 — 预览版
+# 纸笺 v0.2.4 — 预览版
 
 本版为 macOS 引入 Developer ID Application 签名与 Apple 公证。发行流水线只在 App、DMG 和最终更新归档全部验证通过后公开安装包。
 
@@ -7,7 +7,8 @@
 - Universal App 使用 Developer ID Application 证书签名，开启 hardened runtime，并附带安全时间戳。
 - App 与 DMG 均提交 Apple 公证并附加票据；校验签名、Gatekeeper，以及 DMG 内的应用。
 - 更新用 `.app.tar.gz` 在重新打包后再次解压验签和验证票据，随后生成 Tauri updater 签名。
-- 公证提交与状态轮询可恢复，首次公证耗时较长也不会因 Tauri 单次等待超时而丢失构建。
+- Apple 仍在处理时保存原始签名文件、校验和和提交 ID；可在同标签的新 CI 运行中恢复，避免重复构建或提交。
+- DMG 使用独立临时钥匙串签名，并从已附加票据的 App 生成，保留应用签名和票据。
 - 缺少凭据、公证被拒绝或任何最终文件校验失败，都会阻止发行。
 
 ## 版本与发布管理
