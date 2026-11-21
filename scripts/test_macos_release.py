@@ -14,6 +14,7 @@ from unittest.mock import patch
 from build_macos_release import validate_credentials
 from build_macos_release import build
 from apple_credentials import create_csr
+import apple_credentials as credentials
 from macos_release import (VERIFICATION_FIELDS, require_macos_verification, run_checked,
                            signing_team, validate_signature_details, verify_app, verify_archive)
 
@@ -22,6 +23,30 @@ DETAILS = f'Authority={IDENTITY}\nTeamIdentifier=ABCDEFGHIJ\nTimestamp=Nov 21, 2
 
 
 class SigningTests(unittest.TestCase):
+    def test_real_crypto_bootstrap_uploads_only_via_stdin_and_cleans_export(self):
+        original = credentials.command
+        with tempfile.TemporaryDirectory() as temporary, redirect_stdout(io.StringIO()) as output:
+            root = Path(temporary)
+            create_csr(root)
+            certificate, api_key = root / 'fixture.cer', root / 'fixture.p8'
+            original(['openssl', 'req', '-new', '-x509', '-key', str(root / 'developer-id-private.pem'), '-passin', f'file:{root / "private-key-password.txt"}', '-subj', '/CN=' + IDENTITY, '-days', '2', '-out', str(certificate)])
+            original(['openssl', 'genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-out', str(api_key)])
+            uploads = {}
+            def local_only(args, **options):
+                if args[0] == 'gh':
+                    if args[2] == 'list': return b'[]'
+                    self.assertEqual(args[2], 'set')
+                    value = options['data']
+                    self.assertTrue(value not in ' '.join(args).encode())
+                    uploads[args[3]] = value
+                    return b''
+                return original(args, **options)
+            with patch.object(credentials, 'command', side_effect=local_only):
+                credentials.configure_secrets(root, certificate, api_key, 'ABCDEFGHIJ', '00000000-0000-4000-8000-000000000001', False)
+            self.assertEqual(set(uploads), set(credentials.SECRET_NAMES))
+            self.assertTrue(all(value not in output.getvalue().encode() for value in uploads.values()))
+            self.assertFalse(list(root.glob('notes-certificate-*')))
+
     def test_csr_uses_encrypted_key_and_refuses_overwrite(self):
         with tempfile.TemporaryDirectory() as temporary:
             with redirect_stdout(io.StringIO()):

@@ -69,7 +69,7 @@ def configure_secrets(directory, certificate, api_key, key_id, issuer, replace):
         uuid.UUID(issuer)
     except ValueError:
         raise ValueError('API Issuer ID must be a UUID for a team API key') from None
-    command(['openssl', 'pkey', '-in', str(api_key), '-check', '-noout'])
+    command(['openssl', 'ec', '-in', str(api_key), '-pubout', '-out', os.devnull])
     existing = json.loads(command(['gh', 'secret', 'list', '--repo', REPOSITORY, '--json', 'name']))
     if not replace and any(item['name'] in SECRET_NAMES for item in existing):
         raise ValueError('Apple secrets already exist. Use --replace only for an intentional replacement or resuming a partial setup')

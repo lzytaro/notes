@@ -48,7 +48,7 @@ def build():
         # Never fall back to an Apple ID/password inherited from the environment.
         for name in ['APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID']:
             env.pop(name, None)
-        run_checked(['openssl', 'pkey', '-in', str(key_path), '-check', '-noout'], 'API private key validation')
+        run_checked(['openssl', 'ec', '-in', str(key_path), '-pubout', '-out', os.devnull], 'API private key validation')
         print('Building Universal app; importing Developer ID certificate, signing, notarizing and stapling with Tauri.', flush=True)
         run_checked(['npm', 'run', 'tauri', '--', 'build', '--ci', '--target', 'universal-apple-darwin', '--bundles', 'app,dmg', '--', '--locked'], 'Signed Tauri build and application notarization', env=env, timeout=4200)
         bundle = Path('src-tauri/target/universal-apple-darwin/release/bundle')
