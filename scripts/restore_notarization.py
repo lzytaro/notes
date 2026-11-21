@@ -10,7 +10,7 @@ import subprocess
 def validate_run(run, repository, commit, tag):
     if (run.get('repository', {}).get('full_name') != repository
             or run.get('head_sha') != commit or run.get('head_branch') != tag
-            or run.get('path') != '.github/workflows/build.yml'
+            or run.get('path', '').split('@', 1)[0] != '.github/workflows/build.yml'
             or run.get('event') not in {'push', 'workflow_dispatch'}
             or run.get('status') != 'completed'):
         raise ValueError('Checkpoint must come from a completed release run of the same repository, tag and commit')

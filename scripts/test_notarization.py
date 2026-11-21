@@ -143,6 +143,8 @@ class RecoveryTests(unittest.TestCase):
     def test_source_run_must_be_same_reviewed_release(self):
         run = {'repository': {'full_name': 'lzytaro/notes'}, 'head_sha': COMMIT, 'head_branch': 'v1.2.3', 'path': '.github/workflows/build.yml', 'event': 'push', 'status': 'completed'}
         validate_run(run, 'lzytaro/notes', COMMIT, 'v1.2.3')
+        for suffix in ['@main', '@refs/tags/v1.2.3']:
+            validate_run({**run, 'path': run['path'] + suffix}, 'lzytaro/notes', COMMIT, 'v1.2.3')
         for field, value in [('head_sha', 'b' * 40), ('head_branch', 'main'), ('path', 'other.yml'), ('event', 'pull_request'), ('status', 'in_progress'), ('repository', {'full_name': 'fork/notes'})]:
             with self.subTest(field=field), self.assertRaises(ValueError):
                 validate_run({**run, field: value}, 'lzytaro/notes', COMMIT, 'v1.2.3')
