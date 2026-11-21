@@ -8,6 +8,7 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import struct
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -44,6 +45,8 @@ class RecoveryTests(unittest.TestCase):
         self.dmg_count = 0
         self.key_paths = []
         self.calls = []
+        self.app_name = 'Fixture.app'
+        self.ditto_name_flags = False
 
     def command(self, command, label, **options):
         self.calls.append(command)
@@ -55,7 +58,7 @@ class RecoveryTests(unittest.TestCase):
             self.assertNotIn('--no-sign', command)
             self.assertFalse(any(k.startswith('APPLE_API_') for k in options['env']))
             self.assertNotIn('APPLE_PASSWORD', options['env'])
-            app = release.BUNDLE / 'macos/Fixture.app/Contents'
+            app = release.BUNDLE / 'macos' / self.app_name / 'Contents'
             app.mkdir(parents=True)
             (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.lzytaro.notes', 'CFBundleShortVersionString': '1.2.3'}))
             (app / 'binary').write_bytes(b'signed executable')
@@ -64,8 +67,19 @@ class RecoveryTests(unittest.TestCase):
             with zipfile.ZipFile(target, 'w') as archive:
                 for f in source.rglob('*'):
                     if f.is_file(): archive.write(f, f.relative_to(source.parent))
+            if self.ditto_name_flags:
+                # Reproduce ditto's UTF-8 bytes with the encoding bit unset in
+                # both local and central headers; payload/CRC remain unchanged.
+                data = bytearray(target.read_bytes())
+                for magic, offset in [(b'PK\x03\x04', 6), (b'PK\x01\x02', 8)]:
+                    start = 0
+                    while (start := data.find(magic, start)) != -1:
+                        flags = struct.unpack_from('<H', data, start + offset)[0]
+                        struct.pack_into('<H', data, start + offset, flags & ~0x800)
+                        start += len(magic)
+                target.write_bytes(data)
         elif command[:3] == ['ditto', '-x', '-k']:
-            with zipfile.ZipFile(command[3]) as archive:
+            with zipfile.ZipFile(command[3], metadata_encoding='utf-8') as archive:
                 archive.extractall(command[4])
         elif command[:3] == ['xcrun', 'notarytool', 'submit']:
             key = Path(command[command.index('--key') + 1])
@@ -115,6 +129,20 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.dmg_count, 0)
         self.assertEqual(self.submits, [APP_ID])
         self.assertFalse(any(key.exists() for key in self.key_paths))
+
+    def test_chinese_ditto_archive_resumes_with_unset_utf8_flag(self):
+        self.app_name = '纸笺.app'
+        self.ditto_name_flags = True
+        Path('src-tauri/tauri.conf.json').write_text('{"productName":"纸笺"}')
+        with self.assertRaises(release.NotarizationPending): self.attempt()
+        with zipfile.ZipFile(release.CHECKPOINT / 'app.zip') as archive:
+            self.assertFalse(archive.namelist()[0].startswith(self.app_name))
+        self.fresh_runner()
+        self.status.update({APP_ID: 'Accepted', DMG_ID: 'Accepted'})
+        self.attempt(resume=True)
+        self.assertEqual(self.build_count, 1)
+        self.assertEqual(self.submits, [APP_ID, DMG_ID])
+        self.assertTrue((release.BUNDLE / 'macos' / self.app_name / 'Contents/binary').is_file())
 
     def test_rejected_dmg_never_reaches_release_directory(self):
         self.status.update({APP_ID: 'Accepted', DMG_ID: 'Invalid'})
