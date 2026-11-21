@@ -51,13 +51,13 @@ python3 scripts/apple_credentials.py configure \
 | `APPLE_API_KEY` | API Key ID，不是私钥内容 |
 | `APPLE_API_PRIVATE_KEY` | 下载的 `.p8` 完整内容 |
 
-`APPLE_API_KEY_PATH` **不是要配置的 Secret**：CI 将 `.p8` 内容写入 runner 临时目录，权限为 600，再把这个临时路径传给 Tauri 和 notarytool。任务结束或失败时会清理临时文件。证书导入与临时签名钥匙串由 Tauri 管理。
+`APPLE_API_KEY_PATH` **不是要配置的 Secret**：CI 将 `.p8` 内容写入 runner 临时目录，权限为 600，只把路径传给 notarytool。Tauri 仅接收应用签名证书，不接收公证凭据。任务结束或失败时清理临时文件。Tauri 清理应用签名钥匙串后，DMG 签名步骤会重新导入独立临时钥匙串，使用后删除并恢复原钥匙串列表。
 
 ## 自动发布顺序
 
 1. 在经过 PR 合并的 `main` 提交上创建新的版本标签；不移动现有标签。
 2. 版本与主分支归属检查通过后构建 Universal App。仅发布构建注入 Apple Secrets，且不使用 `--no-sign`。
-3. Tauri 导入 Developer ID 证书并从内到外签名二进制；CI 随后创建 App 归档，单独提交公证并轮询状态。首次公证可能需要数小时，因此不把发布绑定在一次 `tauri build` 的等待超时上。
+3. Tauri 导入 Developer ID 证书并从内到外签名二进制；CI 保存确切的 App 归档、SHA-256、版本及源码提交，再提交公证并立即保存 Apple 提交 ID。
 4. App 获得 `Accepted` 后附加并验证 App 票据，再从已附加票据的 App 重新生成 DMG；单独提交 DMG 公证，等待 `Accepted` 后附加并验证 DMG 票据。
 5. 对 App 执行 `codesign --verify --deep --strict --verbose=2`、`spctl --assess --type execute --verbose=4` 和 `xcrun stapler validate`；检查身份、secure timestamp、hardened runtime，并拒绝 debugger entitlement。
 6. 验证 DMG 签名、公证票据和 Gatekeeper；只读挂载 DMG 后，验证里面的 App。
@@ -66,6 +66,22 @@ python3 scripts/apple_credentials.py configure \
 9. 发布任务要求 macOS 的全部验证记录为真，两个平台都通过后才上传并公开 GitHub Release。
 
 缺少凭据、签名或票据不匹配、公证被拒绝、Gatekeeper 不接受、归档验证失败，都阻止发布。Windows 维持现有构建与 updater 签名，暂不引入 Authenticode。
+
+## 公证等待与恢复
+
+每次 App / DMG 提交最多轮询 10 分钟。Apple 仍在处理时，步骤以退出码 75 结束并阻止发布；`always()` 步骤把 `state.json`、原始签名 App 归档和已生成的 DMG 保存为 `macos-notarization-<run-id>-<attempt>` artifact，保留 30 天。这里没有证书、私钥、密码或工具日志；这些 checkpoint 是尚未发布的中间文件，不可当作安装包分发。
+
+Apple 返回结果后，在 **同一个版本标签** 手动运行 `CI and release`，把 `resume_run_id` 填为上次已结束的运行 ID：
+
+```bash
+gh workflow run build.yml --repo lzytaro/notes --ref v<version> -f resume_run_id=<run-id>
+```
+
+恢复步骤仅接受同仓库、同标签、同 commit、同 workflow 的已结束发布运行，并选择该运行最后一次 attempt 的 checkpoint。恢复后校验所有文件 SHA-256 和 Developer ID 签名，查询原来的提交 ID；不重新构建 App 或重复提交已获得回执的 App/DMG。只有 Apple 返回 `Accepted` 才附加票据，再运行全部发行验证。Windows 在恢复运行中照常构建。若仍在等待，下一次使用本次运行 ID 继续。
+
+网络中断导致“可能已上传，但没有保存提交 ID”时，恢复会明确停止，要求先核查 Apple history，不会盲目重复提交。已有 checkpoint 却未传 `--resume` 时也会拒绝重新构建。
+
+更改源码仍必须走 PR 和新版本标签；只有源码不变、沿用原始文件和提交 ID 的公证等待可以恢复原标签。此前 v0.2.2 / v0.2.3 的等待流程没有持久化 checkpoint，不能通过该入口恢复。
 
 ## 验收边界
 

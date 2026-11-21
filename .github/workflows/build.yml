@@ -6,6 +6,11 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      resume_run_id:
+        description: 'Completed run of this SAME tag with a saved macOS notarization checkpoint (blank for a new build)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -33,11 +38,7 @@ jobs:
           python-version: '3.12'
       - name: Audit public source
         run: |
-          python3 scripts/test_audit_public.py
-          python3 scripts/test_package_release.py
-          python3 scripts/test_update_manifest.py
-          python3 scripts/test_macos_release.py
-          python3 scripts/test_release_policy.py
+          python3 -m unittest discover -s scripts -p 'test_*.py'
           python3 scripts/audit_public.py
       - name: Install pinned Gitleaks
         shell: bash
@@ -62,8 +63,11 @@ jobs:
   desktop:
     name: Build ${{ matrix.platform }}
     needs: audit
-    # Apple may take several hours to complete a first notarization review.
-    timeout-minutes: 360
+    # Apple is polled for 10 minutes per submission; pending jobs save a checkpoint.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -105,7 +109,13 @@ jobs:
       - name: Build unsigned development installers
         if: ${{ !startsWith(github.ref, 'refs/tags/') || runner.os != 'macOS' }}
         run: npm run tauri -- build --ci --no-sign ${{ matrix.args }} -- --locked
-      - name: Build signed and notarized macOS release
+      - name: Restore macOS notarization checkpoint
+        if: ${{ startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' && inputs.resume_run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECOVERY_RUN_ID: ${{ inputs.resume_run_id }}
+        run: python3 scripts/restore_notarization.py --run-id "$RECOVERY_RUN_ID"
+      - name: Build or resume signed and notarized macOS release
         if: ${{ startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -114,7 +124,25 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-        run: python3 scripts/build_macos_release.py
+          RECOVERY_RUN_ID: ${{ inputs.resume_run_id }}
+        shell: bash
+        run: |
+          if [ -n "$RECOVERY_RUN_ID" ]; then
+            python3 scripts/build_macos_release.py --resume
+          else
+            python3 scripts/build_macos_release.py
+          fi
+      - name: Preserve notarization checkpoint
+        if: ${{ always() && startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' && hashFiles('artifacts/notarization/state.json') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-notarization-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/notarization/state.json
+            artifacts/notarization/app.zip
+            artifacts/notarization/installer.dmg
+          if-no-files-found: error
+          retention-days: 30
       - name: Test native update selection and validation
         run: cargo test ${{ runner.os == 'Windows' && '--release' || '' }} --locked --manifest-path src-tauri/Cargo.toml --lib
       - name: Package unsigned CI distributables
