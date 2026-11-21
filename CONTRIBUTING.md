@@ -24,7 +24,7 @@ PR 和 `main` 的构建不导入 Apple 凭据，也不提交公证。它们的�
 
 ## 发布
 
-采用 SemVer。发布标签不可移动或删除；修复失败发行时创建新的版本。
+采用 SemVer。发布标签不可移动或删除；修复源码导致的失败发行时创建新的版本。Apple 仍在处理时，可沿用同一标签、原始签名文件和提交 ID 恢复公证，操作见 [macOS 签名说明](docs/MACOS_SIGNING.md#公证等待与恢复)。
 
 1. 创建 `release/v<version>` 分支，在同一个 PR 更新 `package.json`、`package-lock.json`（含根包条目）、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 和 `src-tauri/tauri.conf.json`，并更新 `docs/RELEASE_NOTES.md`。
 2. 所有检查通过后 squash merge 到 `main`。

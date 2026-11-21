@@ -1,22 +1,35 @@
-"""Build, Developer-ID sign and notarize an application and its DMG using CI secrets."""
+"""Sign and notarize macOS releases, retaining exact bytes and receipts for recovery."""
+import argparse
 import base64
+from contextlib import contextmanager
+import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
 import re
+import secrets
+import shlex
+import shutil
+import stat
 import sys
 import tempfile
 import time
 import uuid
+import zipfile
 from macos_release import run_checked, signing_team, verify_app, verify_signature
 
 REQUIRED_SECRETS = (
     'APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'APPLE_SIGNING_IDENTITY',
     'APPLE_API_ISSUER', 'APPLE_API_KEY', 'APPLE_API_PRIVATE_KEY',
 )
-NOTARIZATION_POLL_SECONDS = 30
-NOTARIZATION_TIMEOUT_SECONDS = 4 * 60 * 60
-TOTAL_NOTARIZATION_TIMEOUT_SECONDS = 5 * 60 * 60
+CHECKPOINT = Path('artifacts/notarization')
+BUNDLE = Path('src-tauri/target/universal-apple-darwin/release/bundle')
+WAIT_SECONDS = 10 * 60
+
+
+class NotarizationPending(RuntimeError):
+    """The job can resume from its saved checkpoint after Apple finishes processing."""
 
 
 def validate_credentials(env):
@@ -36,152 +49,241 @@ def validate_credentials(env):
         raise ValueError('APPLE_API_PRIVATE_KEY must contain the complete downloaded .p8 file')
 
 
-def submission_id(result):
-    """Extract a notarytool submission UUID without echoing its output."""
-    output = b'\n'.join(part for part in [result.stdout, result.stderr] if part).decode(errors='replace')
-    for line in output.splitlines():
+
+def private_file(path, content):
+    with open(path, 'xb', opener=lambda name, flags: os.open(name, flags, 0o600)) as output:
+        output.write(content)
+
+
+@contextmanager
+def dmg_signing_keychain(env):
+    """Tauri removes its own keychain. Import an isolated one just for the DMG."""
+    with tempfile.TemporaryDirectory(prefix='notes-dmg-sign-', dir=env.get('RUNNER_TEMP')) as temporary:
+        keychain = Path(temporary) / 'signing.keychain-db'
+        certificate = Path(temporary) / 'certificate.p12'
+        private_file(certificate, base64.b64decode(env['APPLE_CERTIFICATE']))
+        password = secrets.token_urlsafe(32)
+        original = shlex.split(run_checked(['security', 'list-keychains', '-d', 'user'], 'Keychain list').stdout.decode())
         try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict) and isinstance(value.get('id'), str):
+            run_checked(['security', 'create-keychain', '-p', password, str(keychain)], 'Temporary keychain creation')
+            run_checked(['security', 'unlock-keychain', '-p', password, str(keychain)], 'Temporary keychain unlock')
+            run_checked(['security', 'import', str(certificate), '-f', 'pkcs12', '-k', str(keychain), '-P', env['APPLE_CERTIFICATE_PASSWORD'], '-T', '/usr/bin/codesign'], 'DMG signing certificate import')
+            run_checked(['security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', password, str(keychain)], 'DMG signing key access')
+            yield keychain
+        finally:
             try:
-                return str(uuid.UUID(value['id']))
-            except ValueError:
-                pass
-    match = re.search(r'(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])', output, re.IGNORECASE)
-    if match:
-        return str(uuid.UUID(match.group(0)))
-    raise ValueError('Apple notarization did not return a submission ID; release blocked')
+                run_checked(['security', 'list-keychains', '-d', 'user', '-s', *original], 'Keychain list restoration')
+            finally:
+                if keychain.exists():
+                    run_checked(['security', 'delete-keychain', str(keychain)], 'Temporary keychain cleanup')
 
 
-def wait_for_notarization(submission, key_path, key_id, issuer, label, *, timeout_seconds=NOTARIZATION_TIMEOUT_SECONDS, poll_seconds=NOTARIZATION_POLL_SECONDS):
-    """Poll Apple without tying the release to notarytool's one-shot wait timeout."""
+def create_dmg(app, destination, volume_name, env):
+    """Package the stapled app directly, preserving its code signature and ticket."""
+    with tempfile.TemporaryDirectory(prefix='notes-dmg-staging-') as temporary:
+        staging = Path(temporary)
+        run_checked(['ditto', '--rsrc', '--extattr', '--acl', str(app), str(staging / app.name)], 'DMG app staging')
+        (staging / 'Applications').symlink_to('/Applications')
+        run_checked(['hdiutil', 'create', '-volname', volume_name, '-srcfolder', str(staging), '-format', 'UDZO', str(destination)], 'DMG creation', timeout=300)
+    with dmg_signing_keychain(env) as keychain:
+        run_checked(['codesign', '--force', '--sign', env['APPLE_SIGNING_IDENTITY'], '--keychain', str(keychain), '--timestamp', str(destination)], 'DMG code signing')
+    verify_signature(destination, env['APPLE_SIGNING_IDENTITY'], executable=False)
+
+
+def digest(path):
+    with open(path, 'rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def save_state(root, state):
+    temporary = root / 'state.json.tmp'
+    temporary.write_text(json.dumps(state, indent=2) + '\n')
+    temporary.replace(root / 'state.json')
+
+
+def load_state(root, version, commit):
+    state = json.loads((root / 'state.json').read_text())
+    if state.get('format') != 1 or state.get('version') != version or state.get('commit') != commit:
+        raise ValueError('Notarization checkpoint belongs to another version or commit')
+    for name, filename in [('app', 'app.zip'), ('dmg', 'installer.dmg')]:
+        record = state.get(name)
+        if record is None and name == 'dmg':
+            continue
+        if not isinstance(record, dict) or record.get('sha256') != digest(root / filename):
+            raise ValueError('Notarization checkpoint checksum mismatch')
+        submission = record.get('submission')
+        if submission is not None:
+            uuid.UUID(submission)
+    return state
+
+
+def parse_response(result):
+    try:
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict):
+            raise ValueError()
+        return data
+    except (ValueError, TypeError):
+        raise ValueError('Apple returned an unreadable response; release blocked') from None
+
+
+def submit(root, state, name, path, auth):
+    record = state[name]
+    if record.get('submission'):
+        return record['submission']
+    if record.get('submission_started'):
+        raise ValueError('Submission receipt is missing. Inspect Apple history before any resubmission; release blocked')
+    # Persist intent before the network operation. An ambiguous network failure
+    # must never cause an automatic duplicate submission on recovery.
+    record['submission_started'] = True
+    save_state(root, state)
+    result = run_checked(['xcrun', 'notarytool', 'submit', str(path), *auth, '--output-format', 'json'], f'{name} notarization submission', timeout=300)
+    response = parse_response(result)
+    try:
+        identifier = str(uuid.UUID(response['id']))
+    except (KeyError, ValueError, TypeError):
+        raise ValueError('Apple did not return a valid submission ID; release blocked') from None
+    record['submission'] = identifier
+    save_state(root, state)
+    print(f'{name} submission receipt saved.', flush=True)
+    return identifier
+
+
+def wait_for_notarization(submission, auth, label, *, timeout_seconds=WAIT_SECONDS, poll_seconds=30):
     deadline = time.monotonic() + timeout_seconds
+    last_status = None
     while True:
-        result = run_checked([
-            'xcrun', 'notarytool', 'info', submission,
-            '--key', str(key_path), '--key-id', key_id, '--issuer', issuer,
-            '--output-format', 'json',
-        ], f'{label} status', timeout=120)
         try:
-            response = json.loads(result.stdout)
-        except (TypeError, json.JSONDecodeError):
-            raise RuntimeError(f'{label} returned an unreadable status; release blocked') from None
+            result = run_checked(['xcrun', 'notarytool', 'info', submission, *auth, '--output-format', 'json'], f'{label} status', timeout=90)
+        except RuntimeError:
+            # A transient read failure does not discard the known submission.
+            if time.monotonic() >= deadline:
+                raise NotarizationPending(f'{label} status is unavailable; resume from the saved checkpoint') from None
+            time.sleep(poll_seconds)
+            continue
+        response = parse_response(result)
+        if response.get('id') != submission:
+            raise ValueError('Apple returned a different submission ID; release blocked')
         status = response.get('status')
+        if status not in {'Accepted', 'Invalid', 'Rejected', 'In Progress', 'Submitted'}:
+            raise ValueError('Apple returned an unexpected status; release blocked')
+        if status != last_status:
+            print(f'{label}: {status}', flush=True)
+            last_status = status
         if status == 'Accepted':
             return
         if status in {'Invalid', 'Rejected'}:
-            raise ValueError(f'{label} was rejected by Apple ({status}); release blocked')
-        if status not in {'In Progress', 'Submitted', 'Accepted'}:
-            raise RuntimeError(f'{label} returned unexpected status; release blocked')
+            raise ValueError(f'{label} was rejected by Apple; release blocked')
         if time.monotonic() >= deadline:
-            raise RuntimeError(f'{label} did not finish within the allowed window; release blocked')
-        time.sleep(poll_seconds)
+            raise NotarizationPending(f'{label} is still processing; resume from the saved checkpoint')
+        time.sleep(min(poll_seconds, max(0, deadline - time.monotonic())))
 
 
-def remaining_timeout(deadline, label):
-    seconds = int(deadline - time.monotonic())
-    if seconds <= 0:
-        raise RuntimeError(f'{label} exceeded the shared notarization window; release blocked')
-    return min(seconds, NOTARIZATION_TIMEOUT_SECONDS)
+def staple(path, label):
+    for attempt in range(3):
+        try:
+            run_checked(['xcrun', 'stapler', 'staple', str(path)], f'{label} ticket stapling')
+            run_checked(['xcrun', 'stapler', 'validate', str(path)], f'{label} ticket verification')
+            return
+        except RuntimeError:
+            if attempt == 2:
+                raise
+            time.sleep(15)
 
 
-def create_dmg(app, destination, volume_name, identity):
-    """Create a DMG from the already-stapled app without rebuilding or resigning it."""
-    with tempfile.TemporaryDirectory(prefix='notes-dmg-staging-') as staging_name:
-        staging = Path(staging_name)
-        run_checked(['ditto', '--rsrc', '--extattr', '--acl', str(app), str(staging / app.name)], 'DMG app staging')
-        run_checked(['ln', '-s', '/Applications', str(staging / 'Applications')], 'DMG Applications link')
-        run_checked(['hdiutil', 'create', '-volname', volume_name, '-srcfolder', str(staging), '-ov', '-format', 'UDZO', str(destination)], 'DMG creation')
-    run_checked(['codesign', '--force', '--sign', identity, '--timestamp', str(destination)], 'DMG code signing')
+def restore_app(archive, destination, app_name):
+    # Artifacts are accepted only from the same reviewed tag run, and are still
+    # checked before extraction, then verified against the Developer ID identity.
+    with zipfile.ZipFile(archive) as zipped:
+        for entry in zipped.infolist():
+            path = PurePosixPath(entry.filename)
+            if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0] not in {app_name, '__MACOSX'} or '\\' in entry.filename:
+                raise ValueError('Unsafe path in notarization checkpoint')
+            if stat.S_ISLNK(entry.external_attr >> 16):
+                target = zipped.read(entry).decode()
+                resolved = posixpath.normpath(str(path.parent / target))
+                if target.startswith('/') or not resolved.startswith(app_name + '/'):
+                    raise ValueError('Escaping link in notarization checkpoint')
+    run_checked(['ditto', '-x', '-k', str(archive), str(destination)], 'Signed app checkpoint extraction')
+    app = destination / app_name
+    if not app.is_dir() or app.is_symlink():
+        raise ValueError('Notarization checkpoint has no application')
+    return app
 
 
-def build():
+def build(*, resume=False, checkpoint=CHECKPOINT, wait_seconds=WAIT_SECONDS):
     if sys.platform != 'darwin':
         raise ValueError('Signed macOS releases must be built on macOS')
     env = os.environ.copy()
     validate_credentials(env)
+    config = json.loads(Path('src-tauri/tauri.conf.json').read_text())
     version = json.loads(Path('package.json').read_text())['version']
+    app_name = config['productName'] + '.app'
+    commit = run_checked(['git', 'rev-parse', 'HEAD'], 'Source commit lookup').stdout.decode().strip()
+    checkpoint = Path(checkpoint)
+    if resume:
+        state = load_state(checkpoint, version, commit)
+    else:
+        if checkpoint.exists() and any(checkpoint.iterdir()):
+            raise ValueError('Checkpoint already exists. Use --resume instead of rebuilding or resubmitting')
+        checkpoint.mkdir(parents=True, exist_ok=True)
+        state = {'format': 1, 'version': version, 'commit': commit}
     with tempfile.TemporaryDirectory(prefix='notes-apple-', dir=env.get('RUNNER_TEMP')) as temporary:
         key_path = Path(temporary) / 'AuthKey.p8'
-        # An on-runner path is not a repository secret. Only file CONTENTS are stored in Secrets.
-        with open(key_path, 'x', opener=lambda path, flags: os.open(path, flags, 0o600)) as key:
-            key.write(env.pop('APPLE_API_PRIVATE_KEY').strip() + '\n')
-        env['APPLE_API_KEY_PATH'] = str(key_path)
-        # Never fall back to an Apple ID/password inherited from the environment.
-        for name in ['APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID']:
-            env.pop(name, None)
+        private_file(key_path, (env.pop('APPLE_API_PRIVATE_KEY').strip() + '\n').encode())
         run_checked(['openssl', 'ec', '-in', str(key_path), '-pubout', '-out', os.devnull], 'API private key validation')
-        # Tauri's built-in notarization waits inside the build command. On a first
-        # submission Apple can take several hours, so build the signed app first
-        # with API credentials removed, then submit and poll explicitly below.
-        build_env = env.copy()
-        for name in ['APPLE_API_ISSUER', 'APPLE_API_KEY', 'APPLE_API_KEY_PATH', 'APPLE_API_PRIVATE_KEY', 'APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID']:
-            build_env.pop(name, None)
-        print('Building Universal app and importing the Developer ID certificate.', flush=True)
-        run_checked(['npm', 'run', 'tauri', '--', 'build', '--ci', '--target', 'universal-apple-darwin', '--bundles', 'app', '--', '--locked'], 'Signed Tauri application build', env=build_env, timeout=2400)
-        bundle = Path('src-tauri/target/universal-apple-darwin/release/bundle')
-        apps = list((bundle / 'macos').glob('*.app'))
-        if len(apps) != 1:
-            raise ValueError('Expected exactly one universal macOS app')
-        app = apps[0]
+        auth = ['--key', str(key_path), '--key-id', env['APPLE_API_KEY'], '--issuer', env['APPLE_API_ISSUER']]
+        app_dir = BUNDLE / 'macos'
+        if resume:
+            if app_dir.exists() and any(app_dir.iterdir()):
+                raise ValueError('Application output must be empty before restoring a checkpoint')
+            app_dir.mkdir(parents=True, exist_ok=True)
+            app = restore_app(checkpoint / 'app.zip', app_dir, app_name)
+        else:
+            build_env = {k: v for k, v in env.items() if not k.startswith(('APPLE_API_', 'TAURI_SIGNING_')) and k not in {'APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID'}}
+            print('Building and Developer-ID signing the Universal app.', flush=True)
+            run_checked(['npm', 'run', 'tauri', '--', 'build', '--ci', '--target', 'universal-apple-darwin', '--bundles', 'app', '--', '--locked'], 'Signed Tauri application build', env=build_env, timeout=2400)
+            app = app_dir / app_name
+            verify_signature(app, env['APPLE_SIGNING_IDENTITY'], executable=True)
+            run_checked(['ditto', '-c', '-k', '--keepParent', '--sequesterRsrc', str(app), str(checkpoint / 'app.zip')], 'Signed app checkpoint creation')
+            state['app'] = {'sha256': digest(checkpoint / 'app.zip')}
+            save_state(checkpoint, state)
         verify_signature(app, env['APPLE_SIGNING_IDENTITY'], executable=True)
-
-        app_zip = Path(temporary) / f'{app.stem}.zip'
-        run_checked(['ditto', '-c', '-k', '--keepParent', str(app), str(app_zip)], 'Application archive creation')
-        result = run_checked([
-            'xcrun', 'notarytool', 'submit', str(app_zip),
-            '--key', str(key_path), '--key-id', env['APPLE_API_KEY'], '--issuer', env['APPLE_API_ISSUER'],
-            '--output-format', 'json',
-        ], 'Application notarization submission', timeout=300)
-        app_submission = submission_id(result)
-        print('Application submitted to Apple; polling until the decision is available.', flush=True)
-        notarization_deadline = time.monotonic() + TOTAL_NOTARIZATION_TIMEOUT_SECONDS
-        wait_for_notarization(app_submission, key_path, env['APPLE_API_KEY'], env['APPLE_API_ISSUER'], 'Application notarization', timeout_seconds=remaining_timeout(notarization_deadline, 'Application notarization'))
-        for attempt in range(3):
-            try:
-                run_checked(['xcrun', 'stapler', 'staple', str(app)], 'Application ticket stapling')
-                break
-            except RuntimeError:
-                if attempt == 2:
-                    raise
-                time.sleep(15)
-        run_checked(['xcrun', 'stapler', 'validate', str(app)], 'Application ticket verification')
-
-        # Create the DMG from the stapled app directly. Tauri's DMG-only bundle
-        # pass rebuilds the app and would discard its ticket.
-        dmg_dir = bundle / 'dmg'
-        dmg_dir.mkdir(parents=True, exist_ok=True)
-        for previous in dmg_dir.glob('*.dmg'):
-            previous.unlink()
-        dmg = dmg_dir / f'notes_{version}_macos-universal.dmg'
+        app_submission = submit(checkpoint, state, 'app', checkpoint / 'app.zip', auth)
+        wait_for_notarization(app_submission, auth, 'Application notarization', timeout_seconds=wait_seconds)
+        staple(app, 'Application')
         verify_app(app, env['APPLE_SIGNING_IDENTITY'], version)
-        create_dmg(app, dmg, f'纸笺 {version}', env['APPLE_SIGNING_IDENTITY'])
+        # The stored app.zip remains the exact bytes originally submitted to
+        # Apple. Every resume staples the restored original only after Accepted.
+        if not state.get('dmg'):
+            temporary_dmg = Path(temporary) / 'installer.dmg'
+            create_dmg(app, temporary_dmg, f'纸笺 {version}', env)
+            shutil.copyfile(temporary_dmg, checkpoint / 'installer.dmg')
+            state['dmg'] = {'sha256': digest(checkpoint / 'installer.dmg')}
+            save_state(checkpoint, state)
+        verify_signature(checkpoint / 'installer.dmg', env['APPLE_SIGNING_IDENTITY'], executable=False)
+        dmg_submission = submit(checkpoint, state, 'dmg', checkpoint / 'installer.dmg', auth)
+        wait_for_notarization(dmg_submission, auth, 'DMG notarization', timeout_seconds=wait_seconds)
+        dmg_dir = BUNDLE / 'dmg'
+        dmg_dir.mkdir(parents=True, exist_ok=True)
+        if any(dmg_dir.iterdir()):
+            raise ValueError('DMG output must be empty; refusing stale output')
+        dmg = dmg_dir / f'notes_{version}_macos-universal.dmg'
+        shutil.copyfile(checkpoint / 'installer.dmg', dmg)
+        staple(dmg, 'DMG')
         verify_signature(dmg, env['APPLE_SIGNING_IDENTITY'], executable=False)
-        print('Application verified. Submitting the signed DMG to Apple.', flush=True)
-        result = run_checked([
-            'xcrun', 'notarytool', 'submit', str(dmg),
-            '--key', str(key_path), '--key-id', env['APPLE_API_KEY'], '--issuer', env['APPLE_API_ISSUER'],
-            '--output-format', 'json',
-        ], 'DMG notarization submission', timeout=300)
-        dmg_submission = submission_id(result)
-        wait_for_notarization(dmg_submission, key_path, env['APPLE_API_KEY'], env['APPLE_API_ISSUER'], 'DMG notarization', timeout_seconds=remaining_timeout(notarization_deadline, 'DMG notarization'))
-        for attempt in range(3):
-            try:
-                run_checked(['xcrun', 'stapler', 'staple', str(dmg)], 'DMG ticket stapling')
-                break
-            except RuntimeError:
-                if attempt == 2:
-                    raise
-                time.sleep(15)
-        run_checked(['xcrun', 'stapler', 'validate', str(dmg)], 'DMG ticket verification')
-    print('App and DMG signed, notarized and stapled; temporary API key removed.', flush=True)
+    print('App and DMG signed, notarized and stapled. Final distribution verification follows.', flush=True)
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--resume', action='store_true')
+    args = parser.parse_args()
     try:
-        build()
+        build(resume=args.resume)
+    except NotarizationPending as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(75) from None
     except (ValueError, RuntimeError) as error:
         raise SystemExit(str(error)) from None
     except Exception:

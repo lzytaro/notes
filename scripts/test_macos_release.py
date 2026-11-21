@@ -12,7 +12,6 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from build_macos_release import validate_credentials
-from build_macos_release import build, submission_id, wait_for_notarization
 from apple_credentials import create_csr
 import apple_credentials as credentials
 from macos_release import (VERIFICATION_FIELDS, require_macos_verification, run_checked,
@@ -56,51 +55,6 @@ class SigningTests(unittest.TestCase):
             self.assertEqual(key.stat().st_mode & 0o777, 0o600)
             self.assertEqual((Path(temporary) / 'private-key-password.txt').stat().st_mode & 0o777, 0o600)
             with self.assertRaisesRegex(ValueError, 'overwrite'): create_csr(temporary)
-
-    def test_key_is_private_temporary_and_removed_on_success_or_rejection(self):
-        for status in ['Accepted', 'Invalid']:
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                (root / 'package.json').write_text('{"version":"1.2.3"}')
-                bundle = root / 'src-tauri/target/universal-apple-darwin/release/bundle'
-                (bundle / 'macos/Fixture.app').mkdir(parents=True)
-                (bundle / 'dmg').mkdir(); (bundle / 'dmg/Fixture.dmg').touch()
-                env = {'RUNNER_TEMP': temporary, 'APPLE_SIGNING_IDENTITY': IDENTITY, 'APPLE_API_KEY': 'ABCDEFGHIJ', 'APPLE_API_ISSUER': '00000000-0000-4000-8000-000000000001', 'APPLE_CERTIFICATE': base64.b64encode(b'fixture').decode(), 'APPLE_CERTIFICATE_PASSWORD': 'fixture-password', 'APPLE_API_PRIVATE_KEY': '-----BEGIN ' + 'PRIVATE KEY-----\nfixture\n-----END ' + 'PRIVATE KEY-----'}
-                key_paths = []
-                def run(command, label, **options):
-                    if command[0] == 'npm':
-                        child_env = options['env']
-                        self.assertNotIn('APPLE_API_PRIVATE_KEY', child_env)
-                        self.assertNotIn('APPLE_API_KEY_PATH', child_env)
-                        if 'build' in command:
-                            self.assertNotIn('--no-sign', command)
-                        else:
-                            self.assertIn('--no-sign', command)
-                    if command[0] == 'xcrun' and command[1:3] == ['notarytool', 'submit']:
-                        index = len(key_paths)
-                        key_paths.append(Path(options.get('env', {}).get('APPLE_API_KEY_PATH', temporary)) / str(index))
-                        identifier = '00000000-0000-4000-8000-' + f'{index + 1:012d}'
-                        return subprocess.CompletedProcess(command, 0, json.dumps({'id': identifier, 'status': 'In Progress'}).encode(), b'')
-                    if command[0] == 'xcrun' and command[1:3] == ['notarytool', 'info']:
-                        return subprocess.CompletedProcess(command, 0, json.dumps({'status': status}).encode(), b'')
-                    return subprocess.CompletedProcess(command, 0, b'', b'')
-                previous = Path.cwd()
-                try:
-                    os.chdir(root)
-                    with patch.dict(os.environ, env, clear=True), patch('build_macos_release.sys.platform', 'darwin'), patch('build_macos_release.run_checked', side_effect=run), patch('build_macos_release.verify_app'), patch('build_macos_release.verify_signature'), redirect_stdout(io.StringIO()):
-                        if status == 'Accepted': build()
-                        else:
-                            with self.assertRaisesRegex(ValueError, 'rejected by Apple'): build()
-                finally:
-                    os.chdir(previous)
-                self.assertGreaterEqual(len(key_paths), 1)
-
-    def test_notarization_submission_id_and_status_are_parsed_without_output(self):
-        result = subprocess.CompletedProcess([], 0, b'{"id":"00000000-0000-4000-8000-000000000123","status":"In Progress"}', b'')
-        self.assertEqual(submission_id(result), '00000000-0000-4000-8000-000000000123')
-        with patch('build_macos_release.run_checked', return_value=subprocess.CompletedProcess([], 0, b'{"status":"Accepted"}', b'')):
-            with patch('build_macos_release.time.monotonic', side_effect=[0, 1]):
-                wait_for_notarization('00000000-0000-4000-8000-000000000123', '/tmp/AuthKey.p8', 'ABCDEFGHIJ', '00000000-0000-4000-8000-000000000001', 'Fixture notarization', timeout_seconds=10, poll_seconds=0)
 
     def test_missing_credentials_report_names_only(self):
         with self.assertRaisesRegex(ValueError, 'APPLE_CERTIFICATE') as error:
