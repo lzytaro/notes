@@ -1,0 +1,149 @@
+name: CI and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  audit:
+    name: Source audit and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Audit public source
+        run: |
+          python3 scripts/test_audit_public.py
+          python3 scripts/test_package_release.py
+          python3 scripts/audit_public.py
+      - name: Install pinned Gitleaks
+        shell: bash
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output "$RUNNER_TEMP/gitleaks.tar.gz"
+          printf '%s  %s\n' '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' "$RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+      - name: Scan all commit history (redacted)
+        run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --log-opts="--all" .'
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, tomllib
+          versions = [json.loads(pathlib.Path(p).read_text())['version'] for p in ['package.json', 'src-tauri/tauri.conf.json']]
+          versions.append(tomllib.loads(pathlib.Path('src-tauri/Cargo.toml').read_text())['package']['version'])
+          assert all('v' + v == os.environ['RELEASE_TAG'] for v in versions), 'Tag and package versions must match'
+          PY
+
+  desktop:
+    name: Build ${{ matrix.platform }}
+    needs: audit
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: macos-universal
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin --bundles app,dmg
+          - os: windows-latest
+            platform: windows-x64
+            targets: x86_64-pc-windows-msvc
+            args: --bundles nsis,msi
+    runs-on: ${{ matrix.os }}
+    env:
+      VITE_SUPABASE_URL: ''
+      VITE_SUPABASE_ANON_KEY: ''
+      VITE_SUPABASE_REDIRECT_URL: ''
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          targets: ${{ matrix.targets }}
+      - run: npm ci
+      - run: npm test
+      - name: Remove build-machine source paths
+        shell: bash
+        run: |
+          echo "RUSTFLAGS=--remap-path-prefix=$GITHUB_WORKSPACE=/src --remap-path-prefix=$HOME=/build" >> "$GITHUB_ENV"
+      - name: Build clean installers
+        run: npm run tauri -- build --ci --no-sign ${{ matrix.args }} -- --locked
+      - name: Package distributables and checksums
+        run: python scripts/package_release.py --platform ${{ matrix.platform }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: notes-${{ matrix.platform }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish verified preview release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [audit, desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: notes-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify checksums
+        working-directory: release-assets
+        run: |
+          sha256sum --check SHA256SUMS-macos-universal.txt
+          sha256sum --check SHA256SUMS-windows-x64.txt
+      - name: Publish only after both platforms pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > "$RUNNER_TEMP/release-state"; then
+            test "$(cat "$RUNNER_TEMP/release-state")" = true || { echo 'Refusing to overwrite a published release'; exit 1; }
+            gh release edit "$RELEASE_TAG" --target "$RELEASE_COMMIT" --notes-file docs/RELEASE_NOTES.md
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease \
+              --title "纸笺 $RELEASE_TAG — 预览版" --notes-file docs/RELEASE_NOTES.md
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
