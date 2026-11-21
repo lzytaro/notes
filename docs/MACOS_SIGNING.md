@@ -57,8 +57,8 @@ python3 scripts/apple_credentials.py configure \
 
 1. 在经过 PR 合并的 `main` 提交上创建新的版本标签；不移动现有标签。
 2. 版本与主分支归属检查通过后构建 Universal App。仅发布构建注入 Apple Secrets，且不使用 `--no-sign`。
-3. Tauri 导入 Developer ID 证书、从内到外签名二进制、提交 App 公证并附加 App 票据。
-4. 单独提交已签名 DMG 公证，等待 `Accepted` 后附加并验证 DMG 票据。
+3. Tauri 导入 Developer ID 证书并从内到外签名二进制；CI 随后创建 App 归档，单独提交公证并轮询状态。首次公证可能需要数小时，因此不把发布绑定在一次 `tauri build` 的等待超时上。
+4. App 获得 `Accepted` 后附加并验证 App 票据，再从已附加票据的 App 重新生成 DMG；单独提交 DMG 公证，等待 `Accepted` 后附加并验证 DMG 票据。
 5. 对 App 执行 `codesign --verify --deep --strict --verbose=2`、`spctl --assess --type execute --verbose=4` 和 `xcrun stapler validate`；检查身份、secure timestamp、hardened runtime，并拒绝 debugger entitlement。
 6. 验证 DMG 签名、公证票据和 Gatekeeper；只读挂载 DMG 后，验证里面的 App。
 7. 重新打包更新用 `.app.tar.gz`，解压最终归档，再验证其 App 签名和票据，防止打包过程丢失公证信息。

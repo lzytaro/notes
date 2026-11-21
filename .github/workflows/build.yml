@@ -62,7 +62,8 @@ jobs:
   desktop:
     name: Build ${{ matrix.platform }}
     needs: audit
-    timeout-minutes: 90
+    # Apple may take several hours to complete a first notarization review.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
