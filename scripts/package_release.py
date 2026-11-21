@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -31,6 +32,7 @@ def public_metadata(member):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--platform', required=True, choices=['macos-universal', 'windows-x64'])
+parser.add_argument('--sign-updates', action='store_true', help='Sign the exact packaged bytes; requires the CI signing secret')
 args = parser.parse_args()
 version = json.loads(Path('package.json').read_text())['version']
 target = Path('src-tauri/target')
@@ -55,7 +57,18 @@ else:
             raise SystemExit(f'Expected exactly one {extension} installer')
         shutil.copyfile(files[0], out / f'notes_{version}_windows-x64.{extension}')
 sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
-metadata = {'version': version, 'commit': sha, 'platform': args.platform, 'signed': False}
+if args.sign_updates:
+    if not os.environ.get('TAURI_SIGNING_PRIVATE_KEY'):
+        raise SystemExit('Missing updater signing secret; refusing unsigned release')
+    artifacts = [out / f'notes_{version}_macos-universal.app.tar.gz'] if args.platform == 'macos-universal' else [out / f'notes_{version}_windows-x64.{ext}' for ext in ['exe', 'msi']]
+    for artifact in artifacts:
+        # Never put a secret in argv or emit signer output, including error output.
+        command = ['node', 'node_modules/@tauri-apps/cli/tauri.js', 'signer', 'sign', '--app-version', version, str(artifact)]
+        result = subprocess.run(command, capture_output=True)
+        signature = Path(str(artifact) + '.sig')
+        if result.returncode or not signature.exists() or not signature.read_text().strip():
+            raise SystemExit('Updater signing failed (signer output withheld)')
+metadata = {'version': version, 'commit': sha, 'platform': args.platform, 'signed': False, 'updater_signed': args.sign_updates}
 (out / f'SOURCE-{args.platform}.json').write_text(json.dumps(metadata, indent=2) + '\n')
 files = sorted(out.iterdir())
 (out / f'SHA256SUMS-{args.platform}.txt').write_text(''.join(f'{hashlib.sha256(f.read_bytes()).hexdigest()}  {f.name}\n' for f in files))

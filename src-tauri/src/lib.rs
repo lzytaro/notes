@@ -1,4 +1,5 @@
 use serde::Serialize;
+mod updates;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -63,6 +64,8 @@ mod commands {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updates::UpdateState::default())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
@@ -73,7 +76,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_app_info,
             commands::show_main_window,
-            commands::open_widget
+            commands::open_widget,
+            updates::check_for_updates,
+            updates::download_update,
+            updates::install_update
         ])
         .setup(|app| {
             let show = MenuItem::with_id(app, "show", "显示纸笺", true, None::<&str>)?;
@@ -84,7 +90,11 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show, &quick_add, &widget, &separator, &quit])?;
 
             TrayIconBuilder::new()
-                .icon(app.default_window_icon().expect("default window icon").clone())
+                .icon(
+                    app.default_window_icon()
+                        .expect("default window icon")
+                        .clone(),
+                )
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {

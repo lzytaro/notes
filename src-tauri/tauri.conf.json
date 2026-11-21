@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "纸笺",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.lzytaro.notes",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -42,6 +42,15 @@
         "languages": [
           "SimpChinese"
         ]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0QjcyOUREOUUyQjhBNTUKUldSVmlpdWUzU20zZEMvUndhTW1UazFHbVZQS0hwRC95OFVNUmdTNUtZUlE1UW9adEw4WjZ2aG8K",
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

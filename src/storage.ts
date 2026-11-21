@@ -93,7 +93,24 @@ export async function loadTasks(fallback: Task[]) {
   }
 }
 
-export async function saveTaskChanges(changedTasks: Task[], allTasks = changedTasks) {
+const pendingWrites = new Set<Promise<void>>()
+let writeFailed = false
+
+// Installation can terminate the process (especially on Windows). Wait for
+// task writes already accepted by this window before handing off to the installer.
+export async function flushTaskWrites() {
+  while (pendingWrites.size) await Promise.all([...pendingWrites])
+  if (writeFailed) throw new Error('本次会话有任务未能保存，请先确认任务数据，再安装更新。')
+}
+
+export function saveTaskChanges(changedTasks: Task[], allTasks = changedTasks) {
+  const write = persistTaskChanges(changedTasks, allTasks).catch(() => { writeFailed = true })
+  pendingWrites.add(write)
+  void write.finally(() => pendingWrites.delete(write))
+  return write
+}
+
+async function persistTaskChanges(changedTasks: Task[], allTasks: Task[]) {
   if (!inTauri()) {
     localStorage.setItem('notes-tasks-v1', JSON.stringify(allTasks))
     return
@@ -144,8 +161,9 @@ export async function saveTaskChanges(changedTasks: Task[], allTasks = changedTa
       )
     }
     await database.execute('COMMIT')
-  } catch {
+  } catch (error) {
     await database.execute('ROLLBACK').catch(() => {})
+    throw error
   }
 }
 

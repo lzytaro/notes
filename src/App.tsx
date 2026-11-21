@@ -35,6 +35,9 @@ import { getCurrentUser, onAuthChange, sendMagicLink, signInWithGoogle, signOutU
 import { syncTasks } from './sync'
 import { nextOccurrence } from './recurrence'
 import { announceTasksChanged, openDesktopWidget } from './desktop'
+import { useUpdater } from './updater'
+import { UpdateSettings } from './UpdateSettings'
+import type { UpdateSnapshot } from './updateController'
 
 const now = new Date()
 const localISO = (date: Date) => {
@@ -146,6 +149,7 @@ const viewTitle: Record<ViewId, string> = {
 }
 
 function App() {
+  const updateState = useUpdater()
   const [tasks, setTasks] = useState<Task[]>(() => {
     const saved = localStorage.getItem('notes-tasks-v1')
     return saved ? (JSON.parse(saved) as Task[]) : initialTasks
@@ -235,6 +239,7 @@ function App() {
         setSearchOpen((value) => !value)
       }
       if (event.key === 'Escape') {
+        setShowSettings(false)
         setShowQuickAdd(false)
         setSearchOpen(false)
       }
@@ -468,7 +473,8 @@ function App() {
       {showDetails && selectedTask && <TaskDetails task={selectedTask} onClose={() => setShowDetails(false)} onUpdate={(patch) => updateTask(selectedTask.id, patch)} onDelete={() => deleteTask(selectedTask.id)} onToggle={() => toggleTask(selectedTask)} />}
       {showQuickAdd && <QuickAddModal inputRef={quickInputRef} onClose={() => setShowQuickAdd(false)} onCreate={createTask} />}
       {showAccount && <AccountModal email={accountEmail} configured={supabaseConfigured} message={accountMessage} busy={accountBusy} onClose={() => setShowAccount(false)} onMessage={setAccountMessage} onEmail={setAccountEmail} onSync={syncNow} />}
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {updateState.phase === 'ready' && !showSettings && <button className="update-ready-banner" onClick={() => setShowSettings(true)}><span className="update-ready-dot" />新版本已准备好<span>查看更新</span></button>}
+      {showSettings && <SettingsModal updateState={updateState} onClose={() => setShowSettings(false)} />}
       {showWidgets && <WidgetStudio onClose={() => setShowWidgets(false)} onQuickAdd={() => { setShowWidgets(false); setShowQuickAdd(true) }} onOpenDesktop={(kind) => void openDesktopWidget(kind)} />}
       {toast && <Toast toast={toast} onClose={() => setToast(null)} />}
     </div>
@@ -602,7 +608,7 @@ function WidgetStudio({ onClose, onQuickAdd, onOpenDesktop }: { onClose: () => v
   </div>
 }
 
-function SettingsModal({ onClose }: { onClose: () => void }) {
+function SettingsModal({ onClose, updateState }: { onClose: () => void; updateState: UpdateSnapshot }) {
   const [autostart, setAutostart] = useState(false)
   const [notifications, setNotifications] = useState(() => localStorage.getItem('notes-notifications-enabled') !== 'false')
   const [busy, setBusy] = useState(false)
@@ -631,15 +637,16 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     localStorage.setItem('notes-notifications-enabled', String(value))
   }
 
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+  return <div className="modal-backdrop settings-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
     <div className="settings-modal" role="dialog" aria-modal="true" aria-label="设置">
       <div className="account-modal-header"><div><div className="eyebrow">纸笺偏好</div><h2>设置</h2></div><button className="icon-button ghost" aria-label="关闭设置" onClick={onClose}><X size={17} /></button></div>
-      <div className="settings-list">
+      <div className="settings-scroll"><div className="settings-list">
         <div className="settings-row"><span className="settings-icon"><Rocket size={17} /></span><div><strong>开机启动</strong><span>登录系统后自动在托盘运行，确保提醒不中断。</span></div><button className={`switch ${autostart ? 'on' : ''}`} aria-pressed={autostart} disabled={!inTauri() || busy} onClick={() => void toggleAutostart}><span /></button></div>
         <div className="settings-row"><span className="settings-icon"><BellRing size={17} /></span><div><strong>桌面提醒</strong><span>在任务到期或提前时间显示系统通知。</span></div><button className={`switch ${notifications ? 'on' : ''}`} aria-pressed={notifications} onClick={toggleNotifications}><span /></button></div>
         <div className="settings-row"><span className="settings-icon"><Keyboard size={17} /></span><div><strong>快速记录快捷键</strong><span>任何应用中按下即可呼出快速录入。</span></div><kbd>⌘ ⇧ 空格</kbd></div>
         <div className="settings-row"><span className="settings-icon"><Moon size={17} /></span><div><strong>主题</strong><span>当前主题跟随系统，可使用顶栏按钮切换。</span></div><span className="settings-value">跟随系统</span></div>
       </div>
+      <UpdateSettings state={updateState} /></div>
       <div className="account-modal-footer"><span>{inTauri() ? '桌面设置会保存在本机。' : '浏览器预览不会修改系统启动项。'}</span><button className="icon-button ghost" aria-label="关闭设置" onClick={onClose}><Check size={16} /></button></div>
     </div>
   </div>

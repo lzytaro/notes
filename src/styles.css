@@ -125,3 +125,43 @@ kbd { color: var(--text-faint); font-size: 11px; padding: 3px 6px; border: 1px s
 .widget-studio-footer-actions { display: flex; align-items: center; gap: 8px; }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
 @media (max-width: 1200px) { .app-shell { grid-template-columns: 230px minmax(560px, 1fr) 340px; }.content-scroll { padding-left: 34px; padding-right: 34px; }.topbar { padding-left: 28px; padding-right: 28px; }.widget-studio-body { grid-template-columns: 1fr; }.widget-controls { display: grid; grid-template-columns: repeat(3, 1fr); } }
+
+/* Updates stay inside the preferences surface and use the same theme tokens. */
+.settings-modal { display: flex; flex-direction: column; max-height: calc(100vh - 48px); }
+:root[data-theme='dark'] .settings-modal { color-scheme: dark; }
+.settings-backdrop { place-items: center; padding: 24px; }
+.settings-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+.settings-modal .account-modal-header, .settings-modal .account-modal-footer { flex-shrink: 0; }
+.update-settings { padding: 6px 26px 22px; }
+.update-section-title { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-top: 1px solid var(--line); }
+.update-section-title h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.update-section-title > span, .update-channel { color: var(--text-faint); font-size: 11px; }
+.update-options { padding: 0 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); }
+.update-preview-option { padding-left: 41px; }
+.update-status-card { margin-top: 14px; padding: 15px; background: var(--surface-muted); border: 1px solid var(--line); border-radius: 12px; }
+.update-status-top { display: flex; align-items: flex-start; gap: 11px; }
+.update-status-icon { display: grid; place-items: center; flex-shrink: 0; width: 31px; height: 31px; color: var(--accent); background: var(--surface-strong); border-radius: 9px; }
+.update-status-top strong { display: block; padding-top: 2px; font-size: 12px; font-weight: 600; }
+.update-status-top p { margin: 6px 0 0; color: var(--text-soft); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.update-status-card.has-error .update-status-icon { color: var(--orange); }
+.update-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.update-actions .primary-button, .update-actions .secondary-button { font-size: 11px; min-height: 32px; padding: 7px 12px; }
+.update-channel { margin-left: auto; white-space: nowrap; }
+.update-text-button { padding: 4px 0; background: none; color: var(--accent); font-size: 11px; }
+.update-progress { margin-top: 14px; }
+.update-progress progress { display: block; width: 100%; height: 5px; border: 0; border-radius: 9px; overflow: hidden; accent-color: var(--accent); }
+.update-progress progress::-webkit-progress-bar { background: var(--line); }
+.update-progress progress::-webkit-progress-value { background: var(--accent); border-radius: 9px; transition: width .2s; }
+.update-progress span, .update-footnote { display: block; margin: 8px 0 0; color: var(--text-soft); font-size: 10px; line-height: 1.6; }
+.update-release-notes { margin-top: 15px; padding: 13px 0 0; border-top: 1px solid var(--line); }
+.update-release-notes summary { cursor: pointer; font-size: 12px; font-weight: 550; }
+.update-release-notes summary span { float: right; color: var(--text-faint); font-size: 11px; font-weight: 400; }
+.update-release-notes pre { margin: 10px 0 0; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; font-size: 11px; line-height: 1.8; color: var(--text-soft); }
+.release-date { margin-top: 12px; color: var(--text-faint); font-size: 10px; }
+.update-security-note { display: flex; align-items: center; justify-content: center; gap: 5px; margin-top: 15px; color: var(--text-faint); font-size: 10px; }
+.update-ready-banner { position: fixed; right: 24px; bottom: 22px; z-index: 15; display: flex; align-items: center; gap: 9px; padding: 13px 16px; background: var(--surface-strong); color: var(--text); border: 1px solid var(--line); border-radius: 13px; box-shadow: var(--shadow-soft); font-size: 12px; }
+.update-ready-banner > span:last-child { margin-left: 12px; color: var(--accent); }
+.update-ready-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.is-working svg { animation: update-spin 1.4s linear infinite; }
+@keyframes update-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .is-working svg { animation: none; } }
