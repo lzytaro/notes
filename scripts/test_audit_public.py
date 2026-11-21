@@ -18,6 +18,8 @@ class AuditTests(unittest.TestCase):
     def test_generated_files_are_rejected(self):
         self.assertTrue(inspect('src-tauri/target/bundle/app', b''))
         self.assertTrue(inspect('notes.db', b''))
+        self.assertTrue(inspect('AuthKey_example.p8', b''))
+        self.assertTrue(inspect('developer.cer', b''))
         self.assertFalse(inspect('src/types.ts', b'export type Task = {}'))
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from create_update_manifest import create_manifest
+from macos_release import VERIFICATION_FIELDS
 
 
 class ManifestTests(unittest.TestCase):
@@ -23,7 +24,7 @@ class ManifestTests(unittest.TestCase):
                 signature.write_text(base64.b64encode(b'untrusted comment: fixture\nfixture\ntrusted comment: timestamp:1\tfile:fixture\tversion:1.2.3\nfixture').decode())
                 files.extend([package, signature])
             source = self.root / f'SOURCE-{platform}.json'
-            source.write_text(json.dumps({'version': '1.2.3', 'commit': 'abc123', 'updater_signed': True}))
+            source.write_text(json.dumps({'version': '1.2.3', 'commit': 'abc123', 'updater_signed': True, 'signed': platform == 'macos-universal', 'notarized': platform == 'macos-universal', 'macos_verification': {field: True for field in VERIFICATION_FIELDS}}))
             files.append(source)
             (self.root / f'SHA256SUMS-{platform}.txt').write_text(''.join(f'{hashlib.sha256(f.read_bytes()).hexdigest()}  {f.name}\n' for f in files))
 
@@ -34,6 +35,13 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(platforms['darwin-aarch64'], platforms['darwin-x86_64'])
         self.assertTrue(platforms['windows-x86_64-msi']['url'].endswith('.msi'))
         self.assertTrue(platforms['windows-x86_64-nsis']['url'].endswith('.exe'))
+
+    def test_refuses_macos_package_without_notarization(self):
+        source = self.root / 'SOURCE-macos-universal.json'
+        data = json.loads(source.read_text()); data['notarized'] = False
+        source.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, 'notarization'):
+            create_manifest(self.root, '1.2.3', '')
 
     def test_refuses_tampered_package_or_signature(self):
         (self.root / 'notes_1.2.3_windows-x64.exe').write_bytes(b'changed')

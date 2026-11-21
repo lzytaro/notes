@@ -43,6 +43,9 @@
           "SimpChinese"
         ]
       }
+    },
+    "macOS": {
+      "hardenedRuntime": true
     }
   },
   "plugins": {

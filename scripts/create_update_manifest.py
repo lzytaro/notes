@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+from macos_release import require_macos_verification
 
 
 def create_manifest(root, version, notes):
@@ -15,6 +16,8 @@ def create_manifest(root, version, notes):
         source = json.loads((root / f'SOURCE-{platform}.json').read_text())
         if source['version'] != version or source.get('updater_signed') is not True:
             raise ValueError('Both platform packages must be signed for this version')
+        if platform == 'macos-universal':
+            require_macos_verification(source)
         for line in (root / f'SHA256SUMS-{platform}.txt').read_text().splitlines():
             checksum, filename = line.split('  ', 1)
             if Path(filename).name != filename or hashlib.sha256((root / filename).read_bytes()).hexdigest() != checksum:

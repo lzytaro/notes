@@ -28,11 +28,16 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
       - name: Audit public source
         run: |
           python3 scripts/test_audit_public.py
           python3 scripts/test_package_release.py
           python3 scripts/test_update_manifest.py
+          python3 scripts/test_macos_release.py
+          python3 scripts/test_release_policy.py
           python3 scripts/audit_public.py
       - name: Install pinned Gitleaks
         shell: bash
@@ -47,22 +52,17 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      - name: Verify release version
+      - name: Verify release versions and merged main ancestry
         if: startsWith(github.ref, 'refs/tags/')
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          python3 - <<'PY'
-          import json, os, pathlib, tomllib
-          versions = [json.loads(pathlib.Path(p).read_text())['version'] for p in ['package.json', 'src-tauri/tauri.conf.json']]
-          versions.append(tomllib.loads(pathlib.Path('src-tauri/Cargo.toml').read_text())['package']['version'])
-          assert all('v' + v == os.environ['RELEASE_TAG'] for v in versions), 'Tag and package versions must match'
-          PY
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: python3 scripts/check_release.py --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
 
   desktop:
     name: Build ${{ matrix.platform }}
     needs: audit
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +89,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: ${{ matrix.targets }}
@@ -98,8 +101,19 @@ jobs:
         shell: bash
         run: |
           echo "RUSTFLAGS=--remap-path-prefix=$GITHUB_WORKSPACE=/src --remap-path-prefix=$HOME=/build" >> "$GITHUB_ENV"
-      - name: Build clean installers
+      - name: Build unsigned development installers
+        if: ${{ !startsWith(github.ref, 'refs/tags/') || runner.os != 'macOS' }}
         run: npm run tauri -- build --ci --no-sign ${{ matrix.args }} -- --locked
+      - name: Build signed and notarized macOS release
+        if: ${{ startsWith(github.ref, 'refs/tags/') && runner.os == 'macOS' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: python3 scripts/build_macos_release.py
       - name: Test native update selection and validation
         run: cargo test ${{ runner.os == 'Windows' && '--release' || '' }} --locked --manifest-path src-tauri/Cargo.toml --lib
       - name: Package unsigned CI distributables
@@ -110,6 +124,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '' }}
         run: python scripts/package_release.py --platform ${{ matrix.platform }} --sign-updates
       - name: Verify packages with the embedded updater public key
         if: startsWith(github.ref, 'refs/tags/')
@@ -122,7 +137,7 @@ jobs:
           retention-days: 14
 
   release:
-    name: Publish verified preview release
+    name: Publish verified release
     if: startsWith(github.ref, 'refs/tags/')
     needs: [audit, desktop]
     runs-on: ubuntu-latest
@@ -133,6 +148,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: notes-*
