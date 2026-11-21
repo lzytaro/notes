@@ -1,6 +1,6 @@
 [package]
 name = "notes-desktop"
-version = "0.2.0"
+version = "0.2.1"
 description = "纸笺 · 随手记录"
 authors = ["lzytaro"]
 edition = "2021"
