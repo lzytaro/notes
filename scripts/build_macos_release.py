@@ -194,7 +194,9 @@ def staple(path, label):
 def restore_app(archive, destination, app_name):
     # Artifacts are accepted only from the same reviewed tag run, and are still
     # checked before extraction, then verified against the Developer ID identity.
-    with zipfile.ZipFile(archive) as zipped:
+    # ditto writes UTF-8 names without always setting ZIP's UTF-8 flag. Python's
+    # default CP437 fallback would misread 纸笺.app and reject our own checkpoint.
+    with zipfile.ZipFile(archive, metadata_encoding='utf-8') as zipped:
         for entry in zipped.infolist():
             path = PurePosixPath(entry.filename)
             if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0] not in {app_name, '__MACOSX'} or '\\' in entry.filename:
