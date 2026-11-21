@@ -16,6 +16,7 @@ REQUIRED_SECRETS = (
 )
 NOTARIZATION_POLL_SECONDS = 30
 NOTARIZATION_TIMEOUT_SECONDS = 4 * 60 * 60
+TOTAL_NOTARIZATION_TIMEOUT_SECONDS = 5 * 60 * 60
 
 
 def validate_credentials(env):
@@ -79,6 +80,23 @@ def wait_for_notarization(submission, key_path, key_id, issuer, label, *, timeou
         time.sleep(poll_seconds)
 
 
+def remaining_timeout(deadline, label):
+    seconds = int(deadline - time.monotonic())
+    if seconds <= 0:
+        raise RuntimeError(f'{label} exceeded the shared notarization window; release blocked')
+    return min(seconds, NOTARIZATION_TIMEOUT_SECONDS)
+
+
+def create_dmg(app, destination, volume_name, identity):
+    """Create a DMG from the already-stapled app without rebuilding or resigning it."""
+    with tempfile.TemporaryDirectory(prefix='notes-dmg-staging-') as staging_name:
+        staging = Path(staging_name)
+        run_checked(['ditto', '--rsrc', '--extattr', '--acl', str(app), str(staging / app.name)], 'DMG app staging')
+        run_checked(['ln', '-s', '/Applications', str(staging / 'Applications')], 'DMG Applications link')
+        run_checked(['hdiutil', 'create', '-volname', volume_name, '-srcfolder', str(staging), '-ov', '-format', 'UDZO', str(destination)], 'DMG creation')
+    run_checked(['codesign', '--force', '--sign', identity, '--timestamp', str(destination)], 'DMG code signing')
+
+
 def build():
     if sys.platform != 'darwin':
         raise ValueError('Signed macOS releases must be built on macOS')
@@ -119,7 +137,8 @@ def build():
         ], 'Application notarization submission', timeout=300)
         app_submission = submission_id(result)
         print('Application submitted to Apple; polling until the decision is available.', flush=True)
-        wait_for_notarization(app_submission, key_path, env['APPLE_API_KEY'], env['APPLE_API_ISSUER'], 'Application notarization')
+        notarization_deadline = time.monotonic() + TOTAL_NOTARIZATION_TIMEOUT_SECONDS
+        wait_for_notarization(app_submission, key_path, env['APPLE_API_KEY'], env['APPLE_API_ISSUER'], 'Application notarization', timeout_seconds=remaining_timeout(notarization_deadline, 'Application notarization'))
         for attempt in range(3):
             try:
                 run_checked(['xcrun', 'stapler', 'staple', str(app)], 'Application ticket stapling')
@@ -130,18 +149,15 @@ def build():
                 time.sleep(15)
         run_checked(['xcrun', 'stapler', 'validate', str(app)], 'Application ticket verification')
 
-        # Recreate the DMG from the stapled app. This ensures the app shipped
-        # inside the DMG carries its own ticket as well as the DMG ticket.
-        bundle_env = build_env.copy()
-        run_checked([
-            'npm', 'run', 'tauri', '--', 'bundle', '--ci', '--target', 'universal-apple-darwin',
-            '--bundles', 'dmg', '--no-sign', '--no-binary-patching',
-        ], 'DMG packaging from stapled application', env=bundle_env, timeout=1200)
-        dmgs = list((bundle / 'dmg').glob('*.dmg'))
-        if len(dmgs) != 1:
-            raise ValueError('Expected exactly one DMG')
-        dmg = dmgs[0]
+        # Create the DMG from the stapled app directly. Tauri's DMG-only bundle
+        # pass rebuilds the app and would discard its ticket.
+        dmg_dir = bundle / 'dmg'
+        dmg_dir.mkdir(parents=True, exist_ok=True)
+        for previous in dmg_dir.glob('*.dmg'):
+            previous.unlink()
+        dmg = dmg_dir / f'notes_{version}_macos-universal.dmg'
         verify_app(app, env['APPLE_SIGNING_IDENTITY'], version)
+        create_dmg(app, dmg, f'纸笺 {version}', env['APPLE_SIGNING_IDENTITY'])
         verify_signature(dmg, env['APPLE_SIGNING_IDENTITY'], executable=False)
         print('Application verified. Submitting the signed DMG to Apple.', flush=True)
         result = run_checked([
@@ -150,7 +166,7 @@ def build():
             '--output-format', 'json',
         ], 'DMG notarization submission', timeout=300)
         dmg_submission = submission_id(result)
-        wait_for_notarization(dmg_submission, key_path, env['APPLE_API_KEY'], env['APPLE_API_ISSUER'], 'DMG notarization')
+        wait_for_notarization(dmg_submission, key_path, env['APPLE_API_KEY'], env['APPLE_API_ISSUER'], 'DMG notarization', timeout_seconds=remaining_timeout(notarization_deadline, 'DMG notarization'))
         for attempt in range(3):
             try:
                 run_checked(['xcrun', 'stapler', 'staple', str(dmg)], 'DMG ticket stapling')
