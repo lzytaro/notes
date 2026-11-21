@@ -16,7 +16,7 @@ PATTERNS = {
     "URL-credentials": rb"https?://[^\s/:]+:[^\s/@]+@",
 }
 PRIVATE_PARTS = {"node_modules", "target", "dist", "gen", ".idea", ".vscode", ".codex", ".agents", ".orca", "audit-output", "release-assets"}
-PRIVATE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".db", ".sqlite", ".sqlite3", ".log", ".map", ".tsbuildinfo"}
+PRIVATE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".p8", ".cer", ".der", ".csr", ".keychain", ".keychain-db", ".db", ".sqlite", ".sqlite3", ".log", ".map", ".tsbuildinfo"}
 
 
 def inspect(name, content):

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path, PurePosixPath
+from macos_release import verify_distribution
 
 
 def public_metadata(member):
@@ -57,6 +58,16 @@ else:
             raise SystemExit(f'Expected exactly one {extension} installer')
         shutil.copyfile(files[0], out / f'notes_{version}_windows-x64.{extension}')
 sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+macos_verification = None
+if args.platform == 'macos-universal' and args.sign_updates:
+    try:
+        macos_verification = verify_distribution(
+            apps[0], out / f'notes_{version}_macos-universal.dmg',
+            out / f'notes_{version}_macos-universal.app.tar.gz',
+            os.environ.get('APPLE_SIGNING_IDENTITY', ''), version,
+        )
+    except Exception:
+        raise SystemExit('macOS release verification failed; refusing to sign or publish unverified software (details withheld)') from None
 if args.sign_updates:
     if not os.environ.get('TAURI_SIGNING_PRIVATE_KEY'):
         raise SystemExit('Missing updater signing secret; refusing unsigned release')
@@ -68,7 +79,9 @@ if args.sign_updates:
         signature = Path(str(artifact) + '.sig')
         if result.returncode or not signature.exists() or not signature.read_text().strip():
             raise SystemExit('Updater signing failed (signer output withheld)')
-metadata = {'version': version, 'commit': sha, 'platform': args.platform, 'signed': False, 'updater_signed': args.sign_updates}
+metadata = {'version': version, 'commit': sha, 'platform': args.platform, 'signed': macos_verification is not None, 'notarized': macos_verification is not None, 'updater_signed': args.sign_updates}
+if macos_verification is not None:
+    metadata['macos_verification'] = macos_verification
 (out / f'SOURCE-{args.platform}.json').write_text(json.dumps(metadata, indent=2) + '\n')
 files = sorted(out.iterdir())
 (out / f'SHA256SUMS-{args.platform}.txt').write_text(''.join(f'{hashlib.sha256(f.read_bytes()).hexdigest()}  {f.name}\n' for f in files))

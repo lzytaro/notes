@@ -19,16 +19,17 @@
 
 发布时保持 `package.json`、锁文件、Cargo 包版本和 Tauri 配置版本一致，再推送 `v<版本>` 标签。CI 会：
 
-1. 完成源码审计、密钥扫描、前端/原生测试和 macOS Universal / Windows x64 构建。
-2. 只收集允许的安装文件，并清除 macOS 归档的构建机所有者信息。
-3. 使用 Tauri CLI 的 `signer sign --app-version` 签名最终文件，生成 `.sig`。私钥只注入签名步骤，签名工具输出不会写入日志。
-4. 使用应用内置公钥验证实际包和签名绑定版本，防止配置了不匹配的私钥。
-5. 生成含签名文件的校验和；两个平台的源提交和版本一致后生成 `latest.json`。
-6. 上传所有文件后才公开 GitHub 预发布版本。缺少签名密钥或任一校验失败都会阻止发布。
+1. 完成源码审计、密钥扫描、前端/原生测试、已合并主分支与版本/锁文件检查，以及 macOS Universal / Windows x64 构建。
+2. macOS 使用 Developer ID 签名，公证并附加 App/DMG 票据，验证 Gatekeeper 与最终更新归档。详见 [macOS 签名说明](MACOS_SIGNING.md)。
+3. 只收集允许的安装文件，并清除 macOS 归档的构建机所有者信息。
+4. 使用 Tauri CLI 的 `signer sign --app-version` 签名最终文件，生成 `.sig`。私钥只注入签名步骤，签名工具输出不会写入日志。
+5. 使用应用内置公钥验证实际包和签名绑定版本，防止配置了不匹配的私钥。
+6. 生成含签名文件的校验和；两个平台的源提交和版本一致后生成 `latest.json`。
+7. 上传所有文件后才公开 GitHub 预发布版本。缺少签名密钥或任一校验失败都会阻止发布。
 
 清单目标包含 `darwin-aarch64`、`darwin-x86_64`、`windows-x86_64-nsis`、`windows-x86_64-msi`。Windows 会沿用安装时使用的安装器类型；通用 `windows-x86_64` 目标供未标记安装类型的构建使用。
 
-更新签名与 macOS/Windows 的发行者代码签名不同。目前仍未做 Apple 公证或 Authenticode 签名。浏览器预览不会下载或安装桌面更新。
+更新签名与 macOS/Windows 的发行者代码签名不同。历史 v0.2.1 及以前的 macOS 包未做 Apple 公证，新发布流程强制签名和公证；Windows 暂未做 Authenticode 签名。浏览器预览不会下载或安装桌面更新。
 
 ## 验证
 
@@ -36,8 +37,8 @@
 npm test
 npm run build
 cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
-python3 scripts/test_package_release.py
-python3 scripts/test_update_manifest.py
+python3.12 scripts/test_package_release.py
+python3.12 scripts/test_update_manifest.py
 # 显式执行只读的 GitHub 联网检查
 cargo test --locked --manifest-path src-tauri/Cargo.toml --lib live_github_release_metadata -- --ignored
 ```

@@ -10,7 +10,7 @@
 
 从 v0.2.1 起，在「设置 → 软件更新」中可手动检查更新，或开启自动检查并下载。自动更新默认关闭，开启后在启动时和每 6 小时检查 GitHub Releases；下载后验证签名，点击「安装并重新启动」才会安装。可查看发布说明、下载进度和错误重试。切换「接收预览版本」可接收本仓库的预发布版本。
 
-v0.1.0 需要先手动安装一次 v0.2.1 或更高版本。更新包使用专用密钥签名，但安装包仍未做 Apple 公证或 Windows Authenticode 签名。请先使用非重要数据体验。详细边界见 [发布说明](docs/RELEASE_NOTES.md)。
+v0.1.0 需要先手动安装一次 v0.2.1 或更高版本。历史 v0.2.1 及以前的更新包使用专用密钥签名，但安装包未做 Apple 公证或 Windows Authenticode 签名。新 macOS 发布流程强制要求 Developer ID 签名、公证与票据验证；Apple 凭据未配置时会阻止发布。请先使用非重要数据体验。详细边界见 [发布说明](docs/RELEASE_NOTES.md)。
 
 ## 本地开发
 
@@ -40,12 +40,14 @@ npm run desktop:build
 
 ## CI 与发布流程
 
-- 提交与 PR：公开文件检查、Gitleaks 全历史扫描、领域测试、前端构建，以及 macOS Universal / Windows x64 安装包构建。
-- 版本标签 `v*`：核对标签和包版本；两个平台全部通过后生成带校验和的 GitHub 预发布版本。
+- `main` 与 PR：公开文件检查、Gitleaks 全历史扫描、领域测试、前端构建，以及 macOS Universal / Windows x64 安装包构建。
+- 版本标签 `v*`：核对版本、锁文件、标签与已合并的 `main` 提交；macOS 的 Developer ID 签名/公证/Gatekeeper 检查和两个平台的更新签名全部通过后，公开 GitHub 预发布版本。
 - 发布包的最终字节经 Tauri 签名，并使用应用内置公钥验证；发布清单匹配 macOS 两种架构及 Windows EXE/MSI 安装方式。
 - 流水线只上传安装包、更新签名/清单、校验和及源代码提交号，不上传整个构建目录、日志、环境文件或本机产物。
 - 版本发布使用最小权限；第三方 Actions 固定到提交 SHA。
 
-维护者配置与签名备份见 [自动更新维护说明](docs/UPDATES.md)。
+维护者配置见 [自动更新维护说明](docs/UPDATES.md) 和 [macOS 签名说明](docs/MACOS_SIGNING.md)。
+
+开发采用短期功能分支 → PR → 必需 CI → squash merge 的流程；发布从已合并的主分支创建不可变版本标签。详见 [贡献与版本管理](CONTRIBUTING.md)。维护脚本使用 Python 3.12+，CI 自动配置对应版本。
 
 提交前请运行 `python3 scripts/audit_public.py --staged`，并遵守 [公开与安全规则](SECURITY.md)。
